@@ -1,3 +1,6 @@
+
+-- Create table
+
 create TABLE [dbo].[netflix_raw](
 	[show_id] [varchar](10) primary key,
 	[type] [varchar](10) NULL,
@@ -12,3 +15,8 @@ create TABLE [dbo].[netflix_raw](
 	[listed_in] [varchar](100) NULL,
 	[description] [varchar](500) NULL
 ) 
+
+-- Create the mapping tables
+CREATE OR REPLACE TABLE netflix_directors (show_id VARCHAR(10), director NVARCHAR(255));
+CREATE TABLE netflix_country (show_id VARCHAR(10), country NVARCHAR(255));
+CREATE TABLE netflix_genre (show_id VARCHAR(10), genre NVARCHAR(255));
