@@ -1,145 +1,174 @@
-select * from netflix_raw 
-where show_id='s5023';
 
---handling foreign characters
+-- testing all data
+select 
+	* 
+from 
+	dbo.netflix_raw
 
---remove duplicates 
-select show_id,COUNT(*) 
-from netflix_raw
-group by show_id 
-having COUNT(*)>1
+-- checking with where showID
 
-select * from netflix_raw
-where concat(upper(title),type)  in (
-select concat(upper(title),type) 
-from netflix_raw
-group by upper(title) ,type
-having COUNT(*)>1
-)
-order by title
+select 
+	* 
+from 
+	dbo.netflix_raw
+where 
+	show_id = 's5023';
+
+
+-- Deduplicate and Load Data
+-- This step uses a CTE to remove duplicates from your netflix_raw 
+-- table and fixes the "Duration" column issue where the value sometimes sits in the "Rating" column.
+
 
 with cte as (
-select * 
-,ROW_NUMBER() over(partition by title , type order by show_id) as rn
-from netflix_raw
+	select *, 
+	ROW_NUMBER() OVER(PARTITION BY title, type ORDER BY show_id) AS rn
+	from netflix_raw
 )
-select show_id,type,title,cast(date_added as date) as date_added,release_year
-,rating,case when duration is null then rating else duration end as duration,description
-into netflix
-from cte 
+insert into netflix 
+select 
+	show_id, type, title,
+	CAST(date_added AS DATE),
+	release_year, rating,
+	CASE WHEN duration IS NULL THEN rating ELSE duration END AS duration,
+	description 
+From cte
+WHERE rn = 1;
 
-select * from netflix
 
+-- Populate Normalized Mapping Tables
+-- We split the comma-separated strings (like listed_in) into individual rows.
 
-
-select show_id , trim(value) as genre
-into netflix_genre
+-- Populate Genres 
+insert into netflix_genre
+select show_id, trim(value)
 from netflix_raw
-cross apply string_split(listed_in,',')
+cross apply string_split(listed_in, ',')
 
+-- Populate Directors
+insert into netflix_directors
+select show_id, trim(value)
+from netflix_raw
+cross apply string_split(director, ',')
 
+-- initital country load (only non-nulls)
 
-select * from netflix_raw
---new table for listed_in,director, country,cast
-
---data type conversions for date added 
-
---populate missing values in country,duration columns
 insert into netflix_country
-select  show_id,m.country 
+select show_id, trim(value)
+from netflix_raw
+CROSS APPLY STRING_SPLIT(country, ',')
+WHERE country IS NOT NULL;
+
+
+--Fill Missing Countries (The "Bug" Fix)
+--Now that the tables exist, we can run your logic to fill missing countries based on the director's history.
+
+insert into netflix_country 
+select nr.show_id, m.country
 from netflix_raw nr
-inner join (
-select director,country
-from  netflix_country nc
-inner join netflix_directors nd on nc.show_id=nd.show_id
-group by director,country
-) m on nr.director=m.director
-where nr.country is null
-
-select * from netflix_raw where director='Ahishor Solomon'
-
-select director,country
-from  netflix_country nc
-inner join netflix_directors nd on nc.show_id=nd.show_id
-group by director,country
-
--------------------
-select * from netflix_raw where duration is null
+INNER JOIN (
+	select nd.director, nc.country
+	from netflix_country nc
+	INNER JOIN netflix_directors nd ON nc.show_id = nd.show_id
+	GROUP BY nd.director, nc.country
+) m ON nr.director = m.director 
+where nr.country IS NULL;
 
 
---populate rest of the nulls as not_available
---drop columns director , listed_in,country,cast
+--Data Analysis Queries
+--Now that the data is clean and split, you can run your analysis.
 
 
+--Analysis 1: Directors with both Movies & TV Shows
+
+select nd.director, 
+	count(distinct case when n.type  = 'Movie' then n.show_id END) as no_of_movies,
+	count(distinct case when n.type = 'TV SHOW' THEN n.show_id END) as no_of_tvshow
+from netflix n 
+inner join netflix_directors nd ON n.show_id = nd.show_id
+group by nd.director 
+having count(distinct n.type) > 1;
 
 
+--Analysis 2: Country with highest Comedy Movies
 
+SELECT TOP 1 nc.country, COUNT(DISTINCT ng.show_id) AS no_of_movies
+FROM netflix_genre ng
+INNER JOIN netflix_country nc ON ng.show_id = nc.show_id
+INNER JOIN netflix n ON ng.show_id = n.show_id
+WHERE ng.genre = 'Comedies' AND n.type = 'Movie'
+GROUP BY nc.country
+ORDER BY no_of_movies DESC;
 
+--Analysis 3: Top Director per Year (Movies)
 
-
---netflix data analysis
-
-/*1  for each director count the no of movies and tv shows created by them in separate columns 
-for directors who have created tv shows and movies both */
-select nd.director 
-,COUNT(distinct case when n.type='Movie' then n.show_id end) as no_of_movies
-,COUNT(distinct case when n.type='TV Show' then n.show_id end) as no_of_tvshow
-from netflix n
-inner join netflix_directors nd on n.show_id=nd.show_id
-group by nd.director
-having COUNT(distinct n.type)>1
-
-
---2 which country has highest number of comedy movies 
-select  top 1 nc.country , COUNT(distinct ng.show_id ) as no_of_movies
-from netflix_genre ng
-inner join netflix_country nc on ng.show_id=nc.show_id
-inner join netflix n on ng.show_id=nc.show_id
-where ng.genre='Comedies' and n.type='Movie'
-group by  nc.country
-order by no_of_movies desc
-
-
---3 for each year (as per date added to netflix), which director has maximum number of movies released
-with cte as (
-select nd.director,YEAR(date_added) as date_year,count(n.show_id) as no_of_movies
-from netflix n
-inner join netflix_directors nd on n.show_id=nd.show_id
-where type='Movie'
-group by nd.director,YEAR(date_added)
+WITH cte AS (
+    SELECT nd.director, YEAR(n.date_added) AS date_year, COUNT(n.show_id) AS no_of_movies
+    FROM netflix n
+    INNER JOIN netflix_directors nd ON n.show_id = nd.show_id
+    WHERE n.type = 'Movie' AND n.date_added IS NOT NULL
+    GROUP BY nd.director, YEAR(n.date_added)
+),
+cte2 AS (
+    SELECT *, 
+    ROW_NUMBER() OVER(PARTITION BY date_year ORDER BY no_of_movies DESC, director ASC) AS rn
+    FROM cte
 )
-, cte2 as (
-select *
-, ROW_NUMBER() over(partition by date_year order by no_of_movies desc, director) as rn
-from cte
---order by date_year, no_of_movies desc
-)
-select * from cte2 where rn=1
+SELECT date_year, director, no_of_movies 
+FROM cte2 
+WHERE rn = 1;
+
+
+--Analysis 4: Average Movie Duration per Genre
+
+SELECT ng.genre, AVG(CAST(REPLACE(duration, ' min', '') AS INT)) AS avg_duration
+FROM netflix n
+INNER JOIN netflix_genre ng ON n.show_id = ng.show_id
+WHERE n.type = 'Movie'
+GROUP BY ng.genre;
+
+
+-- Analysis 5: Directors who made both Horror and Comedy
+
+SELECT nd.director,
+    COUNT(DISTINCT CASE WHEN ng.genre = 'Comedies' THEN n.show_id END) AS no_of_comedy,
+    COUNT(DISTINCT CASE WHEN ng.genre = 'Horror Movies' THEN n.show_id END) AS no_of_horror
+FROM netflix n
+INNER JOIN netflix_genre ng ON n.show_id = ng.show_id
+INNER JOIN netflix_directors nd ON n.show_id = nd.show_id
+WHERE n.type = 'Movie' AND ng.genre IN ('Comedies', 'Horror Movies')
+GROUP BY nd.director
+HAVING COUNT(DISTINCT ng.genre) = 2;
 
 
 
---4 what is average duration of movies in each genre
-select ng.genre , avg(cast(REPLACE(duration,' min','') AS int)) as avg_duration
-from netflix n
-inner join netflix_genre ng on n.show_id=ng.show_id
-where type='Movie'
-group by ng.genre
 
---5  find the list of directors who have created horror and comedy movies both.
--- display director names along with number of comedy and horror movies directed by them 
-select nd.director
-, count(distinct case when ng.genre='Comedies' then n.show_id end) as no_of_comedy 
-, count(distinct case when ng.genre='Horror Movies' then n.show_id end) as no_of_horror
-from netflix n
-inner join netflix_genre ng on n.show_id=ng.show_id
-inner join netflix_directors nd on n.show_id=nd.show_id
-where type='Movie' and ng.genre in ('Comedies','Horror Movies')
-group by nd.director
-having COUNT(distinct ng.genre)=2;
 
-select * from netflix_genre where show_id in 
-(select show_id from netflix_directors where director='Steve Brill')
-order by genre
 
-Steve Brill	5	1
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
